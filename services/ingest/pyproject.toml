@@ -3,9 +3,9 @@ requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "visualsprint-api"
+name = "visualsprint-ingest"
 version = "0.1.0"
-description = "Deterministic API shell for the VisualSprint platform."
+description = "Deterministic ingest service shell for the VisualSprint platform."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

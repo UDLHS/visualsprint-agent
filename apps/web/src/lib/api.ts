@@ -1,11 +1,19 @@
 import type {
+  ChunkInsightResponse,
   CompleteCaptureChunkUploadRequest,
   CompleteCaptureChunkUploadResponse,
   CaptureSessionResponse,
   CreateMeetingRequest,
   CreateMeetingResponse,
+  FinalReportResponse,
+  IndexedOutcomeDocumentsResponse,
+  MeetingSummaryPacketResponse,
+  PlatformMetaResponse,
+  MeetingStreamEvent,
   MeetingDetailResponse,
   MeetingListResponse,
+  RegisterAgentOutputsRequest,
+  RegisterAgentOutputsResponse,
   RegisterCaptureChunkRequest,
   RegisterCaptureChunkResponse,
   StartCaptureSessionRequest,
@@ -35,8 +43,16 @@ export function getApiBaseUrl() {
   return defaultApiBaseUrl;
 }
 
+export function getMeetingEventsUrl(meetingId: string) {
+  return `${defaultApiBaseUrl}/api/meetings/${meetingId}/events`;
+}
+
 export function listMeetings() {
   return request<MeetingListResponse>("/api/meetings");
+}
+
+export function getPlatformMeta() {
+  return request<PlatformMetaResponse>("/api/meta");
 }
 
 export function getMeeting(meetingId: string) {
@@ -59,6 +75,42 @@ export function startMeeting(meetingId: string) {
 export function endMeeting(meetingId: string) {
   return request<MeetingDetailResponse>(`/api/meetings/${meetingId}/end`, {
     method: "POST",
+  });
+}
+
+export function getFinalReport(meetingId: string) {
+  return request<FinalReportResponse>(`/api/meetings/${meetingId}/final-report`);
+}
+
+export function getChunkInsight(meetingId: string, clientChunkId: string) {
+  return request<ChunkInsightResponse>(
+    `/api/meetings/${meetingId}/insights/chunks/${clientChunkId}`,
+  );
+}
+
+export function getSummaryPacket(meetingId: string) {
+  return request<MeetingSummaryPacketResponse>(`/api/meetings/${meetingId}/summary-packet`);
+}
+
+export function getIndexedOutcomeDocuments(meetingId: string) {
+  return request<IndexedOutcomeDocumentsResponse>(
+    `/api/meetings/${meetingId}/memory/index-documents`,
+  );
+}
+
+export function finalizeReport(meetingId: string) {
+  return request<FinalReportResponse>(`/api/meetings/${meetingId}/final-report`, {
+    method: "POST",
+  });
+}
+
+export function registerAgentOutputs(
+  meetingId: string,
+  payload: RegisterAgentOutputsRequest,
+) {
+  return request<RegisterAgentOutputsResponse>(`/api/meetings/${meetingId}/outputs/register`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 
@@ -109,3 +161,5 @@ export function completeCaptureSession(meetingId: string) {
     },
   );
 }
+
+export type { MeetingStreamEvent };

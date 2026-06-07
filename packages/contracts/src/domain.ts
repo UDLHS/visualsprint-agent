@@ -31,6 +31,24 @@ export type CaptureChunkLifecycleStatus =
 export type CaptureChunkUploadStatus = "pending" | "ready" | "uploaded";
 export type BlockerSeverity = "low" | "medium" | "high";
 export type MemoryMatchStrength = "related" | "recurring" | "critical";
+export type MemoryMatchRelation =
+  | "new"
+  | "recurring"
+  | "reopened"
+  | "resolved_previously";
+export type ReasoningRecordStatus = "open" | "updated" | "resolved" | "reopened";
+export type ReasoningRecordType =
+  | "decision"
+  | "commitment"
+  | "blocker"
+  | "open_question";
+export type ScreenEventKind =
+  | "code_editor"
+  | "terminal"
+  | "diagram"
+  | "slide"
+  | "error"
+  | "ui_state";
 
 export interface PartnerTrack {
   slug: PartnerTrackSlug;
@@ -55,12 +73,42 @@ export interface FoundationalService {
   responsibility: string;
 }
 
+export interface DownstreamServiceStatus {
+  service: string;
+  kind: "control_plane" | "ingest" | "media";
+  configured: boolean;
+  reachable: boolean;
+  mode: "local" | "remote" | "fallback";
+  baseUrl: null | string;
+  status: "ok" | "unreachable" | "not_configured";
+  version: null | string;
+  track: null | string;
+  note: string;
+}
+
+export interface PlatformMetaResponse {
+  service: string;
+  environment: string;
+  selectedTrack: string;
+  supportedTracks: string[];
+  architecture: {
+    frontend: string;
+    backend: string;
+    agentOrchestration: string;
+    memoryLayer: string;
+  };
+  modules: string[];
+  downstreamServices: DownstreamServiceStatus[];
+}
+
 export interface MeetingMetrics {
   decisionsCount: number;
   commitmentsCount: number;
   blockersCount: number;
   memoryMatchesCount: number;
+  openQuestionsCount: number;
   transcriptSegmentsCount: number;
+  visualEventsCount: number;
   captureEventsCount: number;
   captureChunksCount: number;
   capturedBytes: number;
@@ -87,7 +135,9 @@ export interface CaptureChunkSummary {
   storageObjectPath: string;
   uploadTarget: CaptureChunkUploadTarget;
   processingStatus: ChunkProcessingStatus;
+  frameCount: number;
   transcriptSegmentCount: number;
+  visualEventCount: number;
   signalCount: number;
 }
 
@@ -135,12 +185,34 @@ export interface TranscriptSegment {
   text: string;
 }
 
+export interface ScreenEvent {
+  id: string;
+  kind: ScreenEventKind;
+  summary: string;
+  frameTimestampMs: number;
+  recordedAt: string;
+}
+
+export interface EvidenceReference {
+  chunkId: string;
+  clientChunkId: string;
+  tStartMs: number;
+  tEndMs: number;
+  transcriptRef: null | string;
+  frameRef: null | string;
+  note: string;
+}
+
 export interface DecisionRecord {
   id: string;
   title: string;
   rationale: string;
   speakerLabel: string;
+  status: ReasoningRecordStatus;
+  firstSeenChunkId: string;
+  lastUpdatedChunkId: string;
   recordedAt: string;
+  evidence: EvidenceReference[];
 }
 
 export interface CommitmentRecord {
@@ -148,7 +220,11 @@ export interface CommitmentRecord {
   ownerLabel: string;
   action: string;
   dueHint: string;
+  status: ReasoningRecordStatus;
+  firstSeenChunkId: string;
+  lastUpdatedChunkId: string;
   recordedAt: string;
+  evidence: EvidenceReference[];
 }
 
 export interface BlockerRecord {
@@ -156,15 +232,34 @@ export interface BlockerRecord {
   summary: string;
   severity: BlockerSeverity;
   ownerLabel: string;
+  status: ReasoningRecordStatus;
+  firstSeenChunkId: string;
+  lastUpdatedChunkId: string;
   recordedAt: string;
+  evidence: EvidenceReference[];
 }
 
 export interface MemoryMatch {
   id: string;
+  sourceMeetingId: string;
   summary: string;
   sourceMeetingTitle: string;
   strength: MemoryMatchStrength;
+  relation: MemoryMatchRelation;
+  score: number;
+  snippet: string;
   recordedAt: string;
+}
+
+export interface OpenQuestionRecord {
+  id: string;
+  question: string;
+  speakerLabel: string;
+  status: ReasoningRecordStatus;
+  firstSeenChunkId: string;
+  lastUpdatedChunkId: string;
+  recordedAt: string;
+  evidence: EvidenceReference[];
 }
 
 export interface MeetingDetail extends MeetingSummary {
@@ -172,10 +267,12 @@ export interface MeetingDetail extends MeetingSummary {
   activeCaptureSession: null | CaptureSessionSummary;
   recentCaptureChunks: CaptureChunkSummary[];
   recentTranscriptSegments: TranscriptSegment[];
+  recentScreenEvents: ScreenEvent[];
   recentDecisions: DecisionRecord[];
   recentCommitments: CommitmentRecord[];
   recentBlockers: BlockerRecord[];
   recentMemoryMatches: MemoryMatch[];
+  recentOpenQuestions: OpenQuestionRecord[];
 }
 
 export interface CreateMeetingRequest {
@@ -227,6 +324,190 @@ export interface RegisterCaptureChunkResponse extends CaptureSessionResponse {
 
 export interface CompleteCaptureChunkUploadResponse extends CaptureSessionResponse {
   chunk: CaptureChunkSummary;
+}
+
+export interface MeetingStateSnapshot {
+  meetingId: string;
+  meetingStatus: MeetingStatus;
+  activeCaptureSessionId: null | string;
+  latestChunkClientId: null | string;
+  openDecisions: DecisionRecord[];
+  openCommitments: CommitmentRecord[];
+  openBlockers: BlockerRecord[];
+  openQuestions: OpenQuestionRecord[];
+}
+
+export interface MeetingStateResponse {
+  meetingState: MeetingStateSnapshot;
+}
+
+export interface ChunkContext {
+  chunk: CaptureChunkSummary;
+  transcriptSegments: TranscriptSegment[];
+  screenEvents: ScreenEvent[];
+}
+
+export interface ChunkContextResponse {
+  meetingId: string;
+  meetingState: MeetingStateSnapshot;
+  chunkContext: ChunkContext;
+}
+
+export interface ChunkInsightFocus {
+  recordType: ReasoningRecordType;
+  summary: string;
+  detail: string;
+  evidence: string[];
+}
+
+export interface ChunkInsight {
+  meetingId: string;
+  meetingTitle: string;
+  meetingNotes: string;
+  clientChunkId: string;
+  focusSummary: string;
+  attentionFlags: string[];
+  reasoningChecklist: string[];
+  focusAreas: ChunkInsightFocus[];
+  memoryQueries: SearchPriorOutcomesRequest[];
+  meetingState: MeetingStateSnapshot;
+  chunkContext: ChunkContext;
+}
+
+export interface ChunkInsightResponse {
+  insight: ChunkInsight;
+}
+
+export interface SummaryPacketHighlight {
+  title: string;
+  detail: string;
+  kind: LiveEventKind;
+  recordedAt: string;
+}
+
+export interface MeetingSummaryPacket {
+  meetingId: string;
+  meetingTitle: string;
+  meetingStatus: MeetingStatus;
+  draftExecutiveSummary: string;
+  reportChecklist: string[];
+  timelineHighlights: SummaryPacketHighlight[];
+  meetingState: MeetingStateSnapshot;
+  decisions: DecisionRecord[];
+  commitments: CommitmentRecord[];
+  blockers: BlockerRecord[];
+  openQuestions: OpenQuestionRecord[];
+  memoryHighlights: MemoryMatch[];
+  transcriptEvidence: TranscriptSegment[];
+  visualEvidence: ScreenEvent[];
+}
+
+export interface MeetingSummaryPacketResponse {
+  summaryPacket: MeetingSummaryPacket;
+}
+
+export interface SearchPriorOutcomesRequest {
+  recordType: ReasoningRecordType;
+  summary: string;
+  detail: string;
+}
+
+export interface SearchPriorOutcomesResponse {
+  matches: MemoryMatch[];
+}
+
+export interface IndexedOutcomeDocument {
+  id: string;
+  meetingId: string;
+  recordType: ReasoningRecordType;
+  summary: string;
+  detail: string;
+  status: ReasoningRecordStatus;
+  ownerLabel: null | string;
+  speakerLabel: null | string;
+  dueHint: null | string;
+  severity: null | BlockerSeverity;
+  firstSeenChunkId: string;
+  lastUpdatedChunkId: string;
+  createdAt: string;
+  updatedAt: string;
+  evidence: EvidenceReference[];
+}
+
+export interface IndexedOutcomeDocumentsResponse {
+  documents: IndexedOutcomeDocument[];
+}
+
+export interface MeetingStreamEvent {
+  type: "meeting.updated";
+  revision: number;
+  meeting: MeetingDetail;
+}
+
+export interface FinalReport {
+  meetingId: string;
+  generatedAt: string;
+  executiveSummary: string;
+  decisions: DecisionRecord[];
+  commitments: CommitmentRecord[];
+  blockers: BlockerRecord[];
+  openQuestions: OpenQuestionRecord[];
+  memoryHighlights: MemoryMatch[];
+}
+
+export interface FinalReportResponse {
+  report: FinalReport;
+}
+
+export interface AgentDecisionInput {
+  title: string;
+  rationale: string;
+  speakerLabel: string;
+}
+
+export interface AgentCommitmentInput {
+  ownerLabel: string;
+  action: string;
+  dueHint: string;
+}
+
+export interface AgentBlockerInput {
+  summary: string;
+  severity: BlockerSeverity;
+  ownerLabel: string;
+}
+
+export interface AgentOpenQuestionInput {
+  question: string;
+  speakerLabel: string;
+}
+
+export interface AgentMemoryMatchInput {
+  sourceMeetingId: string;
+  summary: string;
+  sourceMeetingTitle: string;
+  strength: MemoryMatchStrength;
+  relation: MemoryMatchRelation;
+  score: number;
+  snippet: string;
+}
+
+export interface RegisterAgentOutputsRequest {
+  clientChunkId: string;
+  decisions: AgentDecisionInput[];
+  commitments: AgentCommitmentInput[];
+  blockers: AgentBlockerInput[];
+  openQuestions: AgentOpenQuestionInput[];
+  memoryMatches: AgentMemoryMatchInput[];
+  resolvedDecisionIds: string[];
+  resolvedCommitmentIds: string[];
+  resolvedBlockerIds: string[];
+  resolvedOpenQuestionIds: string[];
+}
+
+export interface RegisterAgentOutputsResponse {
+  meeting: MeetingDetail;
+  meetingState: MeetingStateSnapshot;
 }
 
 export interface ServiceHealth {

@@ -6,15 +6,22 @@ import {
   partnerTracks,
   sourceConnectors,
   type BlockerRecord,
+  type ChunkInsight,
   type CaptureChunkSummary,
   type CaptureSessionSummary,
   type CommitmentRecord,
   type CreateMeetingRequest,
   type DecisionRecord,
+  type FinalReport,
+  type IndexedOutcomeDocument,
   type MemoryMatch,
   type MeetingDetail,
+  type MeetingSummaryPacket,
   type MeetingSummary,
+  type PlatformMetaResponse,
+  type OpenQuestionRecord,
   type RegisterCaptureChunkRequest,
+  type ScreenEvent,
   type TranscriptSegment,
 } from "@visualsprint/contracts";
 import { startTransition, useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -23,6 +30,13 @@ import {
   completeCaptureChunkUpload,
   completeCaptureSession,
   createMeeting,
+  finalizeReport,
+  getChunkInsight,
+  getFinalReport,
+  getIndexedOutcomeDocuments,
+  getMeetingEventsUrl,
+  getPlatformMeta,
+  getSummaryPacket,
   endMeeting,
   getApiBaseUrl,
   getMeeting,
@@ -30,6 +44,7 @@ import {
   registerCaptureChunk,
   startCaptureSession,
   startMeeting,
+  type MeetingStreamEvent,
 } from "../lib/api";
 
 const initialDraft: CreateMeetingRequest = {
@@ -46,6 +61,7 @@ type CaptureSupport = {
 };
 
 type CapturePhase = "idle" | "requesting" | "recording" | "stopping";
+type StreamStatus = "idle" | "connecting" | "live" | "reconnecting";
 
 type CaptureResources = {
   stream: MediaStream;
@@ -62,6 +78,12 @@ export function MeetingDashboard() {
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [capturePhase, setCapturePhase] = useState<CapturePhase>("idle");
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>("idle");
+  const [finalReport, setFinalReport] = useState<FinalReport | null>(null);
+  const [chunkInsight, setChunkInsight] = useState<ChunkInsight | null>(null);
+  const [summaryPacket, setSummaryPacket] = useState<MeetingSummaryPacket | null>(null);
+  const [indexedOutcomes, setIndexedOutcomes] = useState<IndexedOutcomeDocument[]>([]);
+  const [platformMeta, setPlatformMeta] = useState<PlatformMetaResponse | null>(null);
   const isClient = useSyncExternalStore(
     subscribeToBrowserAvailability,
     () => true,
@@ -101,8 +123,10 @@ export function MeetingDashboard() {
     void (async () => {
       setError(null);
       try {
+        const metaResponse = await getPlatformMeta();
         const meetingResponse = await listMeetings();
         startTransition(() => {
+          setPlatformMeta(metaResponse);
           setMeetings(meetingResponse.meetings);
         });
         const meetingList = meetingResponse.meetings;
@@ -121,6 +145,148 @@ export function MeetingDashboard() {
       cleanupCaptureRef.current?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!selectedMeeting?.id || selectedMeeting.status !== "ended") {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const reportResponse = await getFinalReport(selectedMeeting.id);
+        startTransition(() => {
+          setFinalReport(reportResponse.report);
+        });
+      } catch {
+        try {
+          const reportResponse = await finalizeReport(selectedMeeting.id);
+          startTransition(() => {
+            setFinalReport(reportResponse.report);
+          });
+        } catch (reportError) {
+          setError(getErrorMessage(reportError));
+        }
+      }
+    })();
+  }, [selectedMeeting?.id, selectedMeeting?.status]);
+
+  useEffect(() => {
+    const latestChunk = selectedMeeting?.recentCaptureChunks[0];
+    if (!selectedMeeting?.id || !latestChunk || latestChunk.processingStatus !== "processed") {
+      startTransition(() => {
+        setChunkInsight(null);
+      });
+      return;
+    }
+
+    void (async () => {
+      try {
+        const insightResponse = await getChunkInsight(
+          selectedMeeting.id,
+          latestChunk.clientChunkId,
+        );
+        startTransition(() => {
+          setChunkInsight(insightResponse.insight);
+        });
+      } catch {
+        startTransition(() => {
+          setChunkInsight(null);
+        });
+      }
+    })();
+  }, [
+    selectedMeeting?.id,
+    selectedMeeting?.recentCaptureChunks,
+  ]);
+
+  useEffect(() => {
+    if (!selectedMeeting?.id) {
+      startTransition(() => {
+        setSummaryPacket(null);
+      });
+      return;
+    }
+
+    void (async () => {
+      try {
+        const summaryResponse = await getSummaryPacket(selectedMeeting.id);
+        startTransition(() => {
+          setSummaryPacket(summaryResponse.summaryPacket);
+        });
+      } catch {
+        startTransition(() => {
+          setSummaryPacket(null);
+        });
+      }
+    })();
+  }, [
+    selectedMeeting?.id,
+    selectedMeeting?.latestEvents,
+    selectedMeeting?.metrics.decisionsCount,
+    selectedMeeting?.metrics.commitmentsCount,
+    selectedMeeting?.metrics.blockersCount,
+    selectedMeeting?.metrics.openQuestionsCount,
+    selectedMeeting?.metrics.memoryMatchesCount,
+  ]);
+
+  useEffect(() => {
+    if (!selectedMeeting?.id) {
+      startTransition(() => {
+        setIndexedOutcomes([]);
+      });
+      return;
+    }
+
+    void (async () => {
+      try {
+        const response = await getIndexedOutcomeDocuments(selectedMeeting.id);
+        startTransition(() => {
+          setIndexedOutcomes(response.documents);
+        });
+      } catch {
+        startTransition(() => {
+          setIndexedOutcomes([]);
+        });
+      }
+    })();
+  }, [
+    selectedMeeting?.id,
+    selectedMeeting?.metrics.decisionsCount,
+    selectedMeeting?.metrics.commitmentsCount,
+    selectedMeeting?.metrics.blockersCount,
+    selectedMeeting?.metrics.openQuestionsCount,
+  ]);
+
+  useEffect(() => {
+    if (!selectedMeeting?.id) {
+      return;
+    }
+    if (typeof EventSource === "undefined") {
+      return;
+    }
+
+    const eventSource = new EventSource(getMeetingEventsUrl(selectedMeeting.id));
+
+    const handleMeetingUpdated = (event: MessageEvent<string>) => {
+      const payload = JSON.parse(event.data) as MeetingStreamEvent;
+      applyMeeting(payload.meeting);
+      setStreamStatus("live");
+    };
+
+    eventSource.onopen = () => {
+      setStreamStatus("live");
+    };
+    eventSource.addEventListener("meeting.updated", handleMeetingUpdated as EventListener);
+    eventSource.onerror = () => {
+      setStreamStatus("reconnecting");
+    };
+
+    return () => {
+      eventSource.removeEventListener("meeting.updated", handleMeetingUpdated as EventListener);
+      eventSource.close();
+      setStreamStatus("idle");
+    };
+  }, [selectedMeeting?.id]);
 
   const captureSupport: CaptureSupport | null =
     !isClient
@@ -177,6 +343,12 @@ export function MeetingDashboard() {
           : await endMeeting(selectedMeeting.id);
 
       applyMeeting(response.meeting);
+      if (action === "end") {
+        const reportResponse = await finalizeReport(selectedMeeting.id);
+        startTransition(() => {
+          setFinalReport(reportResponse.report);
+        });
+      }
       await refreshMeetings();
     } catch (actionError) {
       setError(getErrorMessage(actionError));
@@ -321,10 +493,12 @@ export function MeetingDashboard() {
   const recentChunks = selectedMeeting?.recentCaptureChunks ?? [];
   const activeCaptureSession = selectedMeeting?.activeCaptureSession;
   const recentTranscriptSegments = selectedMeeting?.recentTranscriptSegments ?? [];
+  const recentScreenEvents = selectedMeeting?.recentScreenEvents ?? [];
   const recentDecisions = selectedMeeting?.recentDecisions ?? [];
   const recentCommitments = selectedMeeting?.recentCommitments ?? [];
   const recentBlockers = selectedMeeting?.recentBlockers ?? [];
   const recentMemoryMatches = selectedMeeting?.recentMemoryMatches ?? [];
+  const recentOpenQuestions = selectedMeeting?.recentOpenQuestions ?? [];
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(52,211,153,0.18),_transparent_28%),linear-gradient(180deg,#09121b_0%,#0a1521_30%,#f4efe2_30%,#f7f4ec_100%)] text-slate-100">
@@ -337,13 +511,13 @@ export function MeetingDashboard() {
               </p>
               <div className="space-y-3">
                 <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-                  Turn capture chunks into live transcript and reasoning signals.
+                  Turn capture chunks into transcript, visual evidence, and reasoning signals.
                 </h1>
                 <p className="max-w-2xl text-base leading-7 text-slate-300 sm:text-lg">
                   This slice keeps the real browser capture path and layers in a
                   development-safe processing loop so each chunk now produces mock
-                  transcript, decision, blocker, commitment, and memory outputs for
-                  the dashboard.
+                  transcript, visual evidence, decision, blocker, commitment, and
+                  memory outputs for the dashboard.
                 </p>
               </div>
             </div>
@@ -353,6 +527,7 @@ export function MeetingDashboard() {
               <Metric label="API base URL" value={getApiBaseUrl()} />
               <Metric label="Meetings in memory" value={String(meetings.length)} />
               <Metric label="Capture phase" value={capturePhase} />
+              <Metric label="Stream" value={streamStatus} />
             </div>
           </div>
         </header>
@@ -467,6 +642,21 @@ export function MeetingDashboard() {
               </p>
             </Card>
 
+            <Card title="Platform topology" eyebrow="Service boundaries">
+              {platformMeta ? (
+                <div className="space-y-3">
+                  {platformMeta.downstreamServices.map((service) => (
+                    <DownstreamServiceCard key={service.kind} service={service} />
+                  ))}
+                </div>
+              ) : (
+                <EmptyState
+                  title="No platform status yet"
+                  body="The dashboard will show control-plane, ingest, and media service status once metadata loads."
+                />
+              )}
+            </Card>
+
             <Card title="Capture rollout" eyebrow="Development path">
               <div className="space-y-3">
                 {captureStages.map((stage) => (
@@ -546,7 +736,9 @@ export function MeetingDashboard() {
                     <MetricCard label="Decisions" value={String(selectedMeeting.metrics.decisionsCount)} />
                     <MetricCard label="Commitments" value={String(selectedMeeting.metrics.commitmentsCount)} />
                     <MetricCard label="Blockers" value={String(selectedMeeting.metrics.blockersCount)} />
+                    <MetricCard label="Open questions" value={String(selectedMeeting.metrics.openQuestionsCount)} />
                     <MetricCard label="Transcript segments" value={String(selectedMeeting.metrics.transcriptSegmentsCount)} />
+                    <MetricCard label="Visual events" value={String(selectedMeeting.metrics.visualEventsCount)} />
                     <MetricCard label="Memory matches" value={String(selectedMeeting.metrics.memoryMatchesCount)} />
                   </div>
 
@@ -687,6 +879,96 @@ export function MeetingDashboard() {
               )}
             </Card>
 
+            <Card title="Visual evidence" eyebrow="Frame extraction">
+              {selectedMeeting ? (
+                <div className="space-y-3">
+                  {recentScreenEvents.length === 0 ? (
+                    <EmptyState
+                      title="No visual evidence yet"
+                      body="Once chunks are uploaded, extracted frames and screen events will show up here."
+                    />
+                  ) : (
+                    recentScreenEvents.map((screenEvent) => (
+                      <ScreenEventCard key={screenEvent.id} screenEvent={screenEvent} />
+                    ))
+                  )}
+                </div>
+              ) : (
+                <EmptyState
+                  title="No visual target"
+                  body="Choose a meeting to inspect derived screen evidence."
+                />
+              )}
+            </Card>
+
+            <Card title="Reasoning packet" eyebrow="Agent input surface">
+              {selectedMeeting ? (
+                chunkInsight ? (
+                  <div className="space-y-5">
+                    <div className="rounded-[1.25rem] border border-slate-900/10 bg-white p-4">
+                      <p className="text-sm font-semibold text-slate-900">Focus summary</p>
+                      <p className="mt-2 text-sm leading-6 text-slate-600">{chunkInsight.focusSummary}</p>
+                      <p className="mt-3 text-xs text-slate-500">
+                        {chunkInsight.clientChunkId} · latest assembled insight payload
+                      </p>
+                    </div>
+
+                    <div className="grid gap-4 xl:grid-cols-2">
+                      <SignalColumn
+                        title="Attention flags"
+                        emptyTitle="No attention flags"
+                        emptyBody="Critical reasoning nudges will appear here for the active chunk."
+                      >
+                        {chunkInsight.attentionFlags.map((flag) => (
+                          <BulletSignalCard key={flag} body={flag} />
+                        ))}
+                      </SignalColumn>
+
+                      <SignalColumn
+                        title="Reasoning checklist"
+                        emptyTitle="No checklist yet"
+                        emptyBody="The deterministic insight assembler will populate review instructions here."
+                      >
+                        {chunkInsight.reasoningChecklist.map((item) => (
+                          <BulletSignalCard key={item} body={item} />
+                        ))}
+                      </SignalColumn>
+
+                      <SignalColumn
+                        title="Focus areas"
+                        emptyTitle="No focus areas yet"
+                        emptyBody="Chunk focus candidates will appear once processed evidence is available."
+                      >
+                        {chunkInsight.focusAreas.map((focusArea) => (
+                          <FocusAreaCard key={`${focusArea.recordType}-${focusArea.summary}`} focusArea={focusArea} />
+                        ))}
+                      </SignalColumn>
+
+                      <SignalColumn
+                        title="Memory query candidates"
+                        emptyTitle="No memory queries yet"
+                        emptyBody="Search payloads for Elastic memory lookup will appear here."
+                      >
+                        {chunkInsight.memoryQueries.map((query) => (
+                          <MemoryQueryCard key={`${query.recordType}-${query.summary}`} query={query} />
+                        ))}
+                      </SignalColumn>
+                    </div>
+                  </div>
+                ) : (
+                  <EmptyState
+                    title="No reasoning packet yet"
+                    body="Once a chunk finishes processing, the assembled agent input will appear here."
+                  />
+                )
+              ) : (
+                <EmptyState
+                  title="No reasoning packet target"
+                  body="Choose a meeting to inspect the latest chunk insight payload."
+                />
+              )}
+            </Card>
+
             <Card title="Reasoning outputs" eyebrow="Agent-facing signals">
               {selectedMeeting ? (
                 <div className="grid gap-4 xl:grid-cols-2">
@@ -729,11 +1011,130 @@ export function MeetingDashboard() {
                       <MemoryMatchCard key={memoryMatch.id} memoryMatch={memoryMatch} />
                     ))}
                   </SignalColumn>
+
+                  <SignalColumn
+                    title="Open questions"
+                    emptyTitle="No open questions yet"
+                    emptyBody="Unresolved questions will appear here for the final report handoff."
+                  >
+                    {recentOpenQuestions.map((openQuestion) => (
+                      <OpenQuestionCard key={openQuestion.id} openQuestion={openQuestion} />
+                    ))}
+                  </SignalColumn>
                 </div>
               ) : (
                 <EmptyState
                   title="No reasoning target"
                   body="Choose a meeting to inspect live reasoning outputs."
+                />
+              )}
+            </Card>
+
+            <Card title="Summary packet" eyebrow="Summary agent input">
+              {selectedMeeting ? (
+                summaryPacket ? (
+                  <div className="space-y-5">
+                    <div className="rounded-[1.25rem] border border-slate-900/10 bg-white p-4">
+                      <p className="text-sm font-semibold text-slate-900">Draft executive summary</p>
+                      <p className="mt-2 text-sm leading-6 text-slate-600">
+                        {summaryPacket.draftExecutiveSummary}
+                      </p>
+                      <p className="mt-3 text-xs text-slate-500">
+                        {summaryPacket.meetingStatus} · summary packet preview for the future Summary Agent
+                      </p>
+                    </div>
+
+                    <div className="grid gap-4 xl:grid-cols-2">
+                      <SignalColumn
+                        title="Report checklist"
+                        emptyTitle="No checklist yet"
+                        emptyBody="Summary guidance will appear here as the packet assembles."
+                      >
+                        {summaryPacket.reportChecklist.map((item) => (
+                          <BulletSignalCard key={item} body={item} />
+                        ))}
+                      </SignalColumn>
+
+                      <SignalColumn
+                        title="Timeline highlights"
+                        emptyTitle="No timeline highlights"
+                        emptyBody="Recent events will be promoted here for the final report narrative."
+                      >
+                        {summaryPacket.timelineHighlights.map((highlight) => (
+                          <SummaryHighlightCard
+                            key={`${highlight.kind}-${highlight.recordedAt}-${highlight.title}`}
+                            highlight={highlight}
+                          />
+                        ))}
+                      </SignalColumn>
+                    </div>
+                  </div>
+                ) : (
+                  <EmptyState
+                    title="No summary packet yet"
+                    body="The deterministic summary-agent input will appear here once meeting state is available."
+                  />
+                )
+              ) : (
+                <EmptyState
+                  title="No summary target"
+                  body="Choose a meeting to inspect the summary packet preview."
+                />
+              )}
+            </Card>
+
+            <Card title="Indexed outcomes" eyebrow="Elastic write-back preview">
+              {selectedMeeting ? (
+                <SignalColumn
+                  title="Index documents"
+                  emptyTitle="No indexed outcomes yet"
+                  emptyBody="Structured outputs will project into deterministic index documents here."
+                >
+                  {indexedOutcomes.map((document) => (
+                    <IndexedOutcomeCard key={document.id} document={document} />
+                  ))}
+                </SignalColumn>
+              ) : (
+                <EmptyState
+                  title="No index target"
+                  body="Choose a meeting to inspect the future Elastic write-back projection."
+                />
+              )}
+            </Card>
+
+            <Card title="Final report" eyebrow="Hero deliverable">
+              {selectedMeeting?.status === "ended" && finalReport?.meetingId === selectedMeeting.id ? (
+                <div className="space-y-5">
+                  <div className="rounded-[1.25rem] border border-slate-900/10 bg-white p-4">
+                    <p className="text-sm font-semibold text-slate-900">Executive summary</p>
+                    <p className="mt-2 text-sm leading-6 text-slate-600">{finalReport.executiveSummary}</p>
+                    <p className="mt-3 text-xs text-slate-500">{formatTimestamp(finalReport.generatedAt)}</p>
+                  </div>
+                  <div className="grid gap-4 xl:grid-cols-2">
+                    <SignalColumn
+                      title="Report decisions"
+                      emptyTitle="No report decisions"
+                      emptyBody="Finalize a meeting with decisions to populate this section."
+                    >
+                      {finalReport.decisions.map((decision) => (
+                        <DecisionCard key={decision.id} decision={decision} />
+                      ))}
+                    </SignalColumn>
+                    <SignalColumn
+                      title="Report open questions"
+                      emptyTitle="No report questions"
+                      emptyBody="Open questions will surface here when the meeting closes."
+                    >
+                      {finalReport.openQuestions.map((openQuestion) => (
+                        <OpenQuestionCard key={openQuestion.id} openQuestion={openQuestion} />
+                      ))}
+                    </SignalColumn>
+                  </div>
+                </div>
+              ) : (
+                <EmptyState
+                  title="No final report yet"
+                  body="End a meeting to generate the deterministic final report surface."
                 />
               )}
             </Card>
@@ -795,9 +1196,9 @@ export function MeetingDashboard() {
           <p className="font-medium text-slate-900">Current implementation note</p>
           <p>
             This slice adds mock chunk processing behind the real browser capture
-            path, so transcript segments and reasoning signals now render live.
-            Cloud storage uploads and managed Google Agent Builder runtime
-            orchestration are still upcoming.
+            path, so transcript segments, visual evidence, and reasoning signals
+            now render live. Cloud storage uploads and managed Google Agent Builder
+            runtime orchestration are still upcoming.
           </p>
           <p className="mt-2">
             Official track options: {partnerTracks.map((track) => track.label).join(", ")}.
@@ -865,6 +1266,39 @@ function SupportBadge({ label, ok }: { label: string; ok: boolean }) {
       <p className="text-xs uppercase tracking-[0.18em]">{label}</p>
       <p className="mt-2 text-sm font-semibold">{ok ? "Available" : "Unavailable"}</p>
     </div>
+  );
+}
+
+function DownstreamServiceCard({
+  service,
+}: {
+  service: PlatformMetaResponse["downstreamServices"][number];
+}) {
+  const statusClassName =
+    service.status === "ok"
+      ? "bg-emerald-100 text-emerald-800"
+      : service.status === "unreachable"
+        ? "bg-amber-100 text-amber-800"
+        : "bg-slate-200 text-slate-700";
+
+  return (
+    <article className="rounded-[1.2rem] border border-slate-900/10 bg-white p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">{service.service}</p>
+          <p className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500">
+            {service.kind} · {service.mode}
+          </p>
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] ${statusClassName}`}>
+          {service.status}
+        </span>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-600">{service.note}</p>
+      <p className="mt-3 text-xs text-slate-500">
+        {service.baseUrl ?? "local process"} · version {service.version ?? "n/a"} · track {service.track ?? "n/a"}
+      </p>
+    </article>
   );
 }
 
@@ -950,7 +1384,7 @@ function CaptureChunkCard({ chunk }: { chunk: CaptureChunkSummary }) {
             {formatBytes(chunk.byteSize)} captured over {formatDuration(chunk.durationMs)}.
           </p>
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
-            {chunk.transcriptSegmentCount} transcript segments · {chunk.signalCount} derived signals
+            {chunk.transcriptSegmentCount} transcript segments · {chunk.visualEventCount} visual events · {chunk.signalCount} derived signals
           </p>
           <p className="mt-2 break-all text-xs text-slate-500">
             {chunk.clientChunkId} · {chunk.storageObjectPath}
@@ -965,6 +1399,9 @@ function CaptureChunkCard({ chunk }: { chunk: CaptureChunkSummary }) {
           </span>
           <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-slate-600">
             processing {chunk.processingStatus}
+          </span>
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-slate-600">
+            {chunk.frameCount} frames
           </span>
           <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-slate-600">
             {chunk.mimeType}
@@ -987,6 +1424,25 @@ function TranscriptCard({ segment }: { segment: TranscriptSegment }) {
         <span className="whitespace-nowrap text-xs text-slate-500">
           {formatTimestamp(segment.startedAt)}
         </span>
+      </div>
+    </article>
+  );
+}
+
+function ScreenEventCard({ screenEvent }: { screenEvent: ScreenEvent }) {
+  return (
+    <article className="rounded-[1.2rem] border border-slate-900/10 bg-white p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">{formatScreenEventKind(screenEvent.kind)}</p>
+          <p className="mt-2 text-sm leading-6 text-slate-600">{screenEvent.summary}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">
+            {formatFrameTimestamp(screenEvent.frameTimestampMs)}
+          </p>
+          <p className="mt-2 text-xs text-slate-500">{formatTimestamp(screenEvent.recordedAt)}</p>
+        </div>
       </div>
     </article>
   );
@@ -1018,10 +1474,17 @@ function SignalColumn({
 function DecisionCard({ decision }: { decision: DecisionRecord }) {
   return (
     <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
-      <p className="text-sm font-semibold text-slate-900">{decision.title}</p>
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">{decision.title}</p>
+        <RecordStatusBadge status={decision.status} />
+      </div>
       <p className="mt-2 text-sm leading-6 text-slate-600">{decision.rationale}</p>
+      <EvidenceList evidence={decision.evidence} />
       <p className="mt-3 text-xs uppercase tracking-[0.16em] text-slate-500">
-        {decision.speakerLabel} · {formatTimestamp(decision.recordedAt)}
+        {decision.speakerLabel} · {decision.firstSeenChunkId} {"->"} {decision.lastUpdatedChunkId}
+      </p>
+      <p className="mt-2 text-xs text-slate-500">
+        {formatTimestamp(decision.recordedAt)}
       </p>
     </article>
   );
@@ -1030,10 +1493,17 @@ function DecisionCard({ decision }: { decision: DecisionRecord }) {
 function CommitmentCard({ commitment }: { commitment: CommitmentRecord }) {
   return (
     <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
-      <p className="text-sm font-semibold text-slate-900">{commitment.ownerLabel}</p>
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">{commitment.ownerLabel}</p>
+        <RecordStatusBadge status={commitment.status} />
+      </div>
       <p className="mt-2 text-sm leading-6 text-slate-600">{commitment.action}</p>
+      <EvidenceList evidence={commitment.evidence} />
       <p className="mt-3 text-xs uppercase tracking-[0.16em] text-slate-500">
-        Due {commitment.dueHint} · {formatTimestamp(commitment.recordedAt)}
+        Due {commitment.dueHint} · {commitment.firstSeenChunkId} {"->"} {commitment.lastUpdatedChunkId}
+      </p>
+      <p className="mt-2 text-xs text-slate-500">
+        {formatTimestamp(commitment.recordedAt)}
       </p>
     </article>
   );
@@ -1044,12 +1514,19 @@ function BlockerCard({ blocker }: { blocker: BlockerRecord }) {
     <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
       <div className="flex items-start justify-between gap-3">
         <p className="text-sm font-semibold text-slate-900">{blocker.summary}</p>
-        <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-amber-800">
-          {blocker.severity}
-        </span>
+        <div className="flex gap-2">
+          <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-amber-800">
+            {blocker.severity}
+          </span>
+          <RecordStatusBadge status={blocker.status} />
+        </div>
       </div>
+      <EvidenceList evidence={blocker.evidence} />
       <p className="mt-3 text-xs uppercase tracking-[0.16em] text-slate-500">
-        Owner {blocker.ownerLabel} · {formatTimestamp(blocker.recordedAt)}
+        Owner {blocker.ownerLabel} · {blocker.firstSeenChunkId} {"->"} {blocker.lastUpdatedChunkId}
+      </p>
+      <p className="mt-2 text-xs text-slate-500">
+        {formatTimestamp(blocker.recordedAt)}
       </p>
     </article>
   );
@@ -1062,8 +1539,158 @@ function MemoryMatchCard({ memoryMatch }: { memoryMatch: MemoryMatch }) {
       <p className="mt-2 text-sm leading-6 text-slate-600">
         Source meeting: {memoryMatch.sourceMeetingTitle}
       </p>
+      <p className="mt-2 text-sm leading-6 text-slate-600">{memoryMatch.snippet}</p>
       <p className="mt-3 text-xs uppercase tracking-[0.16em] text-slate-500">
-        {memoryMatch.strength} · {formatTimestamp(memoryMatch.recordedAt)}
+        {memoryMatch.relation} · {memoryMatch.strength} · score {memoryMatch.score.toFixed(2)}
+      </p>
+      <p className="mt-2 text-xs text-slate-500">
+        {memoryMatch.sourceMeetingId} · {formatTimestamp(memoryMatch.recordedAt)}
+      </p>
+    </article>
+  );
+}
+
+function BulletSignalCard({ body }: { body: string }) {
+  return (
+    <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
+      <p className="text-sm leading-6 text-slate-600">{body}</p>
+    </article>
+  );
+}
+
+function FocusAreaCard({ focusArea }: { focusArea: ChunkInsight["focusAreas"][number] }) {
+  return (
+    <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">{focusArea.summary}</p>
+        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-slate-600">
+          {focusArea.recordType.replace("_", " ")}
+        </span>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-600">{focusArea.detail}</p>
+      <div className="mt-3 space-y-2">
+        {focusArea.evidence.map((evidence) => (
+          <p key={evidence} className="rounded-xl bg-slate-100 px-3 py-2 text-xs leading-5 text-slate-600">
+            {evidence}
+          </p>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function MemoryQueryCard({ query }: { query: ChunkInsight["memoryQueries"][number] }) {
+  return (
+    <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">{query.summary}</p>
+        <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-amber-800">
+          {query.recordType.replace("_", " ")}
+        </span>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-600">{query.detail}</p>
+    </article>
+  );
+}
+
+function SummaryHighlightCard({
+  highlight,
+}: {
+  highlight: MeetingSummaryPacket["timelineHighlights"][number];
+}) {
+  return (
+    <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">{highlight.title}</p>
+        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-slate-600">
+          {highlight.kind}
+        </span>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-600">{highlight.detail}</p>
+      <p className="mt-3 text-xs text-slate-500">{formatTimestamp(highlight.recordedAt)}</p>
+    </article>
+  );
+}
+
+function IndexedOutcomeCard({ document }: { document: IndexedOutcomeDocument }) {
+  return (
+    <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">{document.summary}</p>
+        <div className="flex gap-2">
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-slate-600">
+            {document.recordType.replace("_", " ")}
+          </span>
+          <RecordStatusBadge status={document.status} />
+        </div>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-600">{document.detail}</p>
+      <p className="mt-3 text-xs uppercase tracking-[0.16em] text-slate-500">
+        {document.firstSeenChunkId} {"->"} {document.lastUpdatedChunkId}
+      </p>
+      <EvidenceList evidence={document.evidence} />
+      <p className="mt-2 text-xs text-slate-500">{formatTimestamp(document.updatedAt)}</p>
+    </article>
+  );
+}
+
+function RecordStatusBadge({
+  status,
+}: {
+  status: DecisionRecord["status"];
+}) {
+  const className =
+    status === "open"
+      ? "bg-emerald-100 text-emerald-800"
+      : status === "updated"
+        ? "bg-sky-100 text-sky-800"
+        : status === "reopened"
+          ? "bg-amber-100 text-amber-800"
+          : "bg-slate-200 text-slate-700";
+
+  return (
+    <span className={`rounded-full px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] ${className}`}>
+      {status}
+    </span>
+  );
+}
+
+function EvidenceList({
+  evidence,
+}: {
+  evidence: DecisionRecord["evidence"];
+}) {
+  if (evidence.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 space-y-2">
+      {evidence.map((reference) => (
+        <p
+          key={`${reference.clientChunkId}-${reference.transcriptRef ?? "none"}-${reference.frameRef ?? "none"}-${reference.tStartMs}`}
+          className="rounded-xl bg-slate-100 px-3 py-2 text-xs leading-5 text-slate-600"
+        >
+          {formatEvidenceReference(reference)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function OpenQuestionCard({ openQuestion }: { openQuestion: OpenQuestionRecord }) {
+  return (
+    <article className="rounded-[1rem] border border-slate-900/10 bg-slate-50 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm font-semibold text-slate-900">{openQuestion.question}</p>
+        <RecordStatusBadge status={openQuestion.status} />
+      </div>
+      <EvidenceList evidence={openQuestion.evidence} />
+      <p className="mt-3 text-xs uppercase tracking-[0.16em] text-slate-500">
+        {openQuestion.speakerLabel} · {openQuestion.firstSeenChunkId} {"->"} {openQuestion.lastUpdatedChunkId}
+      </p>
+      <p className="mt-2 text-xs text-slate-500">
+        {formatTimestamp(openQuestion.recordedAt)}
       </p>
     </article>
   );
@@ -1106,6 +1733,17 @@ function formatDuration(durationMs: number) {
     return `${durationMs} ms`;
   }
   return `${(durationMs / 1000).toFixed(1)} s`;
+}
+
+function formatEvidenceReference(reference: DecisionRecord["evidence"][number]) {
+  const rangeLabel = `${formatFrameTimestamp(reference.tStartMs)}-${formatFrameTimestamp(reference.tEndMs)}`;
+  const transcriptLabel = reference.transcriptRef ? `transcript ${reference.transcriptRef}` : "no transcript ref";
+  const frameLabel = reference.frameRef ? `frame ${reference.frameRef}` : "no frame ref";
+  return `${reference.clientChunkId} · ${rangeLabel} · ${transcriptLabel} · ${frameLabel} · ${reference.note}`;
+}
+
+function formatFrameTimestamp(value: number) {
+  return `${(value / 1000).toFixed(1)} s`;
 }
 
 function formatBytes(byteSize: number) {
@@ -1237,6 +1875,10 @@ function buildClientChunkId(captureSessionId: string, sequence: number) {
 
 function formatRecorderMimeType(value: string) {
   return value === "browser-default" ? "browser default" : value;
+}
+
+function formatScreenEventKind(value: ScreenEvent["kind"]) {
+  return value.replaceAll("_", " ");
 }
 
 const inputClassName =
